@@ -1,0 +1,46 @@
+{
+  "gateway": {
+    "port": 18789
+  },
+
+  "providers": {
+    "llm-gateway": {
+      "type": "openai",
+      "base_url": "https://your-llm-gateway/v1",
+      "api_key": "${LLM_GATEWAY_API_KEY}"
+    }
+  },
+
+  "llm": {
+    "provider": "llm-gateway",
+    "model": "deepseek-v3",
+    "api_key_ref": "llm-gateway:default"
+  },
+
+  "mcp_servers": [
+    {
+      "name": "memclaw",
+      "url": "http://localhost:8000/mcp",
+      "headers": {
+        "X-API-Key": "${MEMCLAW_API_KEY}"
+      }
+    }
+  ],
+
+  "agents": {
+    "sourcing-agent": {
+      "workspace": "workspace-sourcing-agent",
+      "description": "Scrapes and writes daily competitor pricing data to shared MemClaw pool"
+    },
+
+    "verification-agent": {
+      "workspace": "workspace-verification-agent",
+      "description": "Cross-checks sourced memories and transitions verified facts to confirmed status"
+    },
+
+    "synthesis-agent": {
+      "workspace": "workspace-synthesis-agent",
+      "description": "Reads governed memory and produces daily intelligence briefs"
+    }
+  }
+}
