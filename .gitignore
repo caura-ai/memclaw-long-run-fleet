@@ -1,0 +1,36 @@
+# Environment
+.env
+
+# OpenClaw runtime — never commit these
+.openclaw/
+
+# OpenClaw workspace runtime state
+agents/**/.openclaw/
+workspace-*/
+workspace/
+
+# Claude Code local settings
+.claude/settings.local.json
+
+# Node
+node_modules/
+
+# SQLite databases
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+.pytest_cache/
+
+# OS
+.DS_Store
+Thumbs.db
