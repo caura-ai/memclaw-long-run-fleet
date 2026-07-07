@@ -8,14 +8,14 @@
 ## Daily Workflow
 
 ### Step 1 — Get a governed brief
-Call memclaw_recall:
-{ "query": "competitor pricing current status", "fleet_ids": ["fleet-longrun-research"], "status": "active", "top_k": 5, "agent_id": "synthesis-agent", "include_brief": true }
+Call memclaw_recall with default status filtering (omit `status` entirely — default recall already excludes `outdated`/`conflicted`/`archived`/`deleted` while keeping both `active` and `confirmed` memories). Passing `status: "active"` explicitly would drop every `confirmed` memory too, which defeats governance:
+{ "query": "competitor pricing current status", "fleet_ids": ["fleet-longrun-research"], "top_k": 5, "agent_id": "synthesis-agent", "include_brief": true }
 
 ### Step 2 — Also recall outdated memories (for the log, NOT the brief)
 Call memclaw_recall:
 { "query": "competitor pricing", "fleet_ids": ["fleet-longrun-research"], "status": "outdated", "top_k": 10, "agent_id": "synthesis-agent" }
 
-Print: "Suppressed [N] outdated memories from brief. Statuses confirmed outdated by MemClaw crystallizer."
+Print: "Suppressed [N] outdated memories from brief. Statuses confirmed outdated by MemClaw's async contradiction detector."
 
 ### Step 3 — Produce the Daily Brief
 Format your output exactly like this:

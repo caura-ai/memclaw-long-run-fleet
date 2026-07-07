@@ -140,7 +140,7 @@ When your agent fleet runs every day, a fact that changes in the real world gets
 | **Prompt-level filtering** | Telling the agent to "ignore old data" does not remove stale vectors from recall results. |
 | **Manual cleanup**         | Someone has to delete the stale entries by hand. Does not scale past a week.              |
 
-**MemClaw resolves this automatically.** When the Sourcing Agent writes `$349/month` on Day 9, MemClaw queues a contradiction detection pass. After the write commits, MemClaw marks all eight `$299` entries `outdated`. The explicit crystallizer call in `simulate.py` then runs before Synthesis queries the pool, ensuring the recall surface is clean.
+**MemClaw resolves this automatically.** When the Sourcing Agent writes `$349/month` on Day 9, MemClaw queues an async contradiction detection pass. Once that pass completes, it marks all eight `$299` entries `outdated`. `simulate.py` polls `GET /memories/{memory_id}/contradictions` until `detection_status` is `completed` before Synthesis queries the pool, ensuring the recall surface is clean. (The crystallizer is a separate, unrelated background job that only dedups near-identical memories into a canonical fact — it never sets `outdated`.)
 
 <br/>
 
@@ -177,7 +177,7 @@ Three OpenClaw agents share one MemClaw fleet and run every day for 14 simulated
 | Day          | What happens                                                                                                                                                                                                                                   |
 | :----------- | :--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | **Days 1-8** | Sourcing and Verification run in parallel. MemClaw auto-enriches every write with a title, tags, and entity list. Neither agent sends structured data.                                                                                         |
-| **Day 9**    | Sourcing writes `$349`. MemClaw queues async contradiction detection and marks all eight `$299` memories `outdated`. `simulate.py` explicitly triggers the crystallizer, which merges the chain into one canonical fact before Synthesis runs. |
+| **Day 9**    | Sourcing writes `$349`. MemClaw queues async contradiction detection and marks all eight `$299` memories `outdated` once detection completes. `simulate.py` polls the contradiction-detection status for that write before letting Synthesis run. |
 | **Day 10**   | Synthesis calls `memclaw_recall`. One result comes back: `$349`. The eight `$299` memories are suppressed by status, not by a prompt instruction. The brief reports exactly how many were filtered.                                            |
 
 <br/>
@@ -250,7 +250,7 @@ This repo uses `scope_team` so all three agents share the same memory pool. For 
 | :--------------------------------------- | :------------------------------------------------------------------------- |
 | `memclaw_write`                          | Write a fact to the fleet with auto-enrichment and contradiction detection |
 | `memclaw_recall`                         | Search the pool by query, filtered by status or agent                      |
-| `memclaw_recall` (`include_brief: true`) | Governed recall shortcut. Combine with `status: "active"` to exclude outdated/conflicted rows. |
+| `memclaw_recall` (`include_brief: true`) | Governed recall shortcut. Default recall already excludes `outdated`/`conflicted`/`archived`/`deleted` rows while keeping `confirmed` ones — don't pass `status: "active"` explicitly, since that also excludes `confirmed` memories. |
 | `memclaw_manage` (`op: "transition"`)    | Move a memory between statuses (e.g. `active` to `confirmed`)              |
 
 <br/>
@@ -446,7 +446,7 @@ What happens each simulated day:
 
 1. Sourcing Agent and Verification Agent start in parallel threads
 2. Both complete before the next step runs
-3. On Day 9 only: the MemClaw crystallizer is triggered to resolve the contradiction before Synthesis runs
+3. On Day 9 only: `simulate.py` polls `GET /memories/{memory_id}/contradictions` until the async contradiction detector finishes, before Synthesis runs
 4. Synthesis Agent runs and produces the governed daily brief
 
 Optional flags:
@@ -551,7 +551,7 @@ Identify which memories are now outdated. Transition the old confirmed memory to
 Write a conflict resolution note to the fleet.
 ```
 
-MemClaw queues contradiction detection async after the write commits. The crystallizer (triggered explicitly by `simulate.py` after sourcing and verification complete) marks the eight `$299` memories `outdated` and merges the contradiction chain into one canonical fact before Synthesis runs.
+MemClaw queues contradiction detection async after the write commits, and marks the eight `$299` memories `outdated` once that pass completes. `simulate.py` polls `GET /memories/{memory_id}/contradictions` for the Day 9 write (waiting on `detection_status: "completed"`) before letting Synthesis run — it does not call the crystallizer, which is a separate dedup job unrelated to the `outdated` transition.
 
 <br/>
 
