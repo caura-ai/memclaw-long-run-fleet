@@ -4,8 +4,12 @@
 Each simulated day:
   1. Sourcing Agent and Verification Agent run concurrently (threads)
   2. Synthesis Agent runs after both complete
-  3. On Day 9: Sourcing Agent writes the $349 drift; crystallizer is triggered
-     after Sourcing + Verification finish, before Synthesis runs
+  3. On Day 9: Sourcing Agent writes the $349 drift. The crystallizer only
+     dedups near-duplicate memories to `archived` -- it never marks anything
+     `outdated`. The $299 -> `outdated` transition is done by MemClaw's async
+     contradiction detector, so after Sourcing + Verification finish we poll
+     GET /memories/{memory_id}/contradictions until detection_status is
+     "completed" before letting Synthesis run.
 
 Usage:
     python simulate.py                 # run all 14 days
@@ -16,6 +20,7 @@ Usage:
 
 import argparse
 import os
+import re
 import sys
 import threading
 import time
@@ -39,7 +44,7 @@ Run your Day {day} data collection workflow exactly as defined in your AGENTS.md
 Today is Day {day}. The competitor price is $299/month.
 
 Execute all steps:
-1. Call memclaw_recall (query: "competitor pricing current", fleet_ids: ["fleet-longrun-research"], status: "active", agent_id: "sourcing-agent", include_brief: true)
+1. Call memclaw_recall (query: "competitor pricing current", fleet_ids: ["fleet-longrun-research"], agent_id: "sourcing-agent", include_brief: true) -- omit status so both active and confirmed memories are visible
 2. Call memclaw_write with: content: "Competitor pricing page shows $299/month for the Pro plan as of Day {day}.", agent_id: "sourcing-agent", fleet_id: "fleet-longrun-research", visibility: "scope_team"
 3. Call memclaw_recall (query: "competitor pricing", fleet_ids: ["fleet-longrun-research"], top_k: 3, agent_id: "sourcing-agent")
 
@@ -52,7 +57,7 @@ Run your Day 9 data collection workflow.
 CRITICAL: The competitor has updated their pricing page. The new price is $349/month (was $299).
 
 Execute all steps:
-1. Call memclaw_recall (query: "competitor pricing current", fleet_ids: ["fleet-longrun-research"], status: "active", agent_id: "sourcing-agent", include_brief: true)
+1. Call memclaw_recall (query: "competitor pricing current", fleet_ids: ["fleet-longrun-research"], agent_id: "sourcing-agent", include_brief: true) -- omit status so both active and confirmed memories are visible
 2. Call memclaw_write with: content: "Competitor pricing page now shows $349/month for the Pro plan. Price increased from $299. Observed Day 9.", agent_id: "sourcing-agent", fleet_id: "fleet-longrun-research", visibility: "scope_team"
 3. Call memclaw_recall (query: "competitor pricing", fleet_ids: ["fleet-longrun-research"], top_k: 5, agent_id: "sourcing-agent")
 
@@ -65,7 +70,7 @@ Run your Day {day} data collection workflow.
 Today is Day {day}. The competitor price remains $349/month.
 
 Execute all steps:
-1. Call memclaw_recall (query: "competitor pricing current", fleet_ids: ["fleet-longrun-research"], status: "active", agent_id: "sourcing-agent", include_brief: true)
+1. Call memclaw_recall (query: "competitor pricing current", fleet_ids: ["fleet-longrun-research"], agent_id: "sourcing-agent", include_brief: true) -- omit status so both active and confirmed memories are visible
 2. Call memclaw_write with: content: "Competitor pricing page continues to show $349/month for the Pro plan as of Day {day}.", agent_id: "sourcing-agent", fleet_id: "fleet-longrun-research", visibility: "scope_team"
 3. Call memclaw_recall (query: "competitor pricing", fleet_ids: ["fleet-longrun-research"], top_k: 3, agent_id: "sourcing-agent")
 
@@ -99,7 +104,7 @@ Run your Day {day} daily intelligence brief workflow exactly as defined in your 
 Today is Day {day}.
 
 Execute all steps:
-1. Call memclaw_recall (query: "competitor pricing current status", fleet_ids: ["fleet-longrun-research"], status: "active", top_k: 5, agent_id: "synthesis-agent", include_brief: true)
+1. Call memclaw_recall (query: "competitor pricing current status", fleet_ids: ["fleet-longrun-research"], top_k: 5, agent_id: "synthesis-agent", include_brief: true) -- omit status so both active and confirmed memories are visible; passing status: "active" would drop confirmed memories too
 2. Call memclaw_recall (query: "competitor pricing", fleet_ids: ["fleet-longrun-research"], status: "outdated", top_k: 10, agent_id: "synthesis-agent")
 3. Print: "Suppressed [N] outdated memories from brief."
 4. Produce the brief in this exact format:
@@ -176,49 +181,51 @@ def call_agent(agent_name: str, prompt: str, day: int, dry_run: bool) -> str:
         sys.exit(1)
 
 
-def trigger_crystallizer(day: int, dry_run: bool) -> None:
-    """POST to MemClaw crystallizer endpoint."""
-    label = f"Day {day:02d} | crystallizer"
+MEMORY_ID_RE = re.compile(r'"(?:memory_)?id"\s*:\s*"([a-zA-Z0-9_-]+)"')
+
+
+def wait_for_contradiction_detection(day: int, sourcing_reply: str, dry_run: bool) -> None:
+    """Poll GET /memories/{memory_id}/contradictions until detection_status is 'completed'.
+
+    Don't reach for the crystallizer here: it only dedups near-duplicate
+    memories to `archived` and never sets `outdated`. The $299 -> `outdated`
+    transition on the Day 9 drift is made by the async contradiction
+    detector, so Synthesis must wait on that signal, not on crystallization.
+    """
+    label = f"Day {day:02d} | contradiction-detection"
 
     if dry_run:
-        log(label, f"DRY RUN -- would POST {MEMCLAW_API_URL}/crystallize")
+        log(label, f"DRY RUN -- would poll {MEMCLAW_API_URL}/memories/{{memory_id}}/contradictions")
         return
 
-    log(label, "Triggering MemClaw crystallizer...")
+    match = MEMORY_ID_RE.search(sourcing_reply)
+    if not match:
+        log(label, "WARNING: Could not find a memory_id in Sourcing Agent's reply. Skipping poll; Synthesis may run before contradiction detection finishes.")
+        return
+    memory_id = match.group(1)
 
-    try:
-        headers = {"Content-Type": "application/json"}
-        if MEMCLAW_API_KEY:
-            headers["X-API-Key"] = MEMCLAW_API_KEY
-        resp = requests.post(
-            f"{MEMCLAW_API_URL}/crystallize",
-            headers=headers,
-            json={"tenant_id": MEMCLAW_TENANT_ID, "fleet_id": MEMCLAW_FLEET_ID},
-            timeout=120,
-        )
-        resp.raise_for_status()
-        log(label, f"Crystallizer triggered: {resp.json()}")
-        # Poll for completion — crystallizer runs async; Synthesis must not read before it finishes
-        for _ in range(12):  # up to 60s
-            time.sleep(5)
-            try:
-                status_resp = requests.get(
-                    f"{MEMCLAW_API_URL}/crystallize/latest",
-                    headers=headers,
-                    params={"tenant_id": MEMCLAW_TENANT_ID, "fleet_id": MEMCLAW_FLEET_ID},
-                    timeout=30,
-                )
-                if status_resp.ok and status_resp.json().get("status") == "completed":
-                    log(label, "Crystallizer completed.")
-                    break
-            except Exception:
-                pass
-        else:
-            log(label, "WARNING: Crystallizer did not confirm completion within 60s. Synthesis may run on unresolved chain.")
-    except requests.exceptions.HTTPError as e:
-        log(label, f"Crystallizer HTTP error: {e} -- {resp.text[:300]}")
-    except Exception as e:
-        log(label, f"WARNING: Crystallizer error: {e}. Synthesis will run on unresolved memory chain.")
+    log(label, f"Polling contradiction detection for memory {memory_id}...")
+
+    headers = {"Content-Type": "application/json"}
+    if MEMCLAW_API_KEY:
+        headers["X-API-Key"] = MEMCLAW_API_KEY
+
+    for _ in range(12):  # up to 60s
+        time.sleep(5)
+        try:
+            resp = requests.get(
+                f"{MEMCLAW_API_URL}/memories/{memory_id}/contradictions",
+                headers=headers,
+                params={"tenant_id": MEMCLAW_TENANT_ID, "fleet_id": MEMCLAW_FLEET_ID},
+                timeout=30,
+            )
+            if resp.ok and resp.json().get("detection_status") == "completed":
+                log(label, "Contradiction detection completed.")
+                break
+        except Exception:
+            pass
+    else:
+        log(label, "WARNING: Contradiction detection did not confirm completion within 60s. Synthesis may run before the $299 memory is marked outdated.")
 
 
 def run_day(day: int, dry_run: bool) -> None:
@@ -260,13 +267,13 @@ def run_day(day: int, dry_run: bool) -> None:
     t_verify.join()
     log(f"Day {day:02d}", "Both agents complete.")
 
-    # After Day 9 parallel run: trigger crystallizer before Synthesis reads
+    # After Day 9 parallel run: wait for contradiction detection before Synthesis reads
     if day == 9:
-        log(f"Day {day:02d}", "Day 9 drift detected -- running nightly crystallizer...")
-        trigger_crystallizer(day, dry_run)
-        log(f"Day {day:02d}", "Crystallizer complete. Synthesis Agent will now recall governed memory.")
+        log(f"Day {day:02d}", "Day 9 drift detected -- waiting for contradiction detection...")
+        wait_for_contradiction_detection(day, sourcing_result.get("reply", ""), dry_run)
+        log(f"Day {day:02d}", "Contradiction detection resolved. Synthesis Agent will now recall governed memory.")
 
-    # Synthesis runs after both agents and optional crystallizer
+    # Synthesis runs after both agents and, on Day 9, after contradiction detection resolves
     log(f"Day {day:02d}", "Starting Synthesis Agent...")
     call_agent("synthesis-agent", synthesis_prompt, day, dry_run)
 
@@ -304,7 +311,7 @@ def main() -> None:
     print(f"Fleet:      {MEMCLAW_FLEET_ID}", flush=True)
     print(f"Days:       {days_to_run}", flush=True)
     print(f"Dry run:    {args.dry_run}", flush=True)
-    print(f"Crystallizer endpoint: {MEMCLAW_API_URL}/crystallize", flush=True)
+    print(f"Contradiction detection endpoint: {MEMCLAW_API_URL}/memories/{{memory_id}}/contradictions", flush=True)
     print(flush=True)
 
     if not args.dry_run:
