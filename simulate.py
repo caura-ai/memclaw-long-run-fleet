@@ -181,7 +181,33 @@ def call_agent(agent_name: str, prompt: str, day: int, dry_run: bool) -> str:
         sys.exit(1)
 
 
-MEMORY_ID_RE = re.compile(r'"(?:memory_)?id"\s*:\s*"([a-zA-Z0-9_-]+)"')
+MEMORY_ID_RE = re.compile(r'"(?:memory_)?id"\s*:\s*"([a-zA-Z0-9_-]{8,})"')
+# UUIDs are what MemClaw actually issues; prefer them over other id-shaped tokens
+UUID_RE = re.compile(
+    r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
+)
+
+
+def extract_memory_id_candidates(sourcing_reply: str) -> list:
+    """Extract candidate memory IDs for the Day 9 write, best guess first.
+
+    The sourcing reply contains IDs from three tool calls: a pre-write recall
+    (old $299 memories), the memclaw_write result (the new $349 memory we
+    actually need), and a post-write recall. To find the write's ID rather
+    than the first ID in the reply, anchor on the text after the last "349"
+    mention (the write result and post-write recall both follow it), preferring
+    UUID-shaped IDs. Remaining IDs are kept as fallbacks, later-first.
+    """
+    anchor = sourcing_reply.rfind("349")
+    tail = sourcing_reply[anchor:] if anchor != -1 else sourcing_reply
+
+    candidates = []
+    for text in (tail, sourcing_reply):
+        for regex in (UUID_RE, MEMORY_ID_RE):
+            for mid in regex.findall(text):
+                if mid not in candidates:
+                    candidates.append(mid)
+    return candidates
 
 
 def wait_for_contradiction_detection(day: int, sourcing_reply: str, dry_run: bool) -> None:
@@ -198,17 +224,20 @@ def wait_for_contradiction_detection(day: int, sourcing_reply: str, dry_run: boo
         log(label, f"DRY RUN -- would poll {MEMCLAW_API_URL}/memories/{{memory_id}}/contradictions")
         return
 
-    match = MEMORY_ID_RE.search(sourcing_reply)
-    if not match:
+    candidates = extract_memory_id_candidates(sourcing_reply)
+    if not candidates:
         log(label, "WARNING: Could not find a memory_id in Sourcing Agent's reply. Skipping poll; Synthesis may run before contradiction detection finishes.")
+        log(label, f"Reply excerpt for debugging: {sourcing_reply[:300]!r}")
         return
-    memory_id = match.group(1)
 
-    log(label, f"Polling contradiction detection for memory {memory_id}...")
+    log(label, f"Candidate memory IDs (best guess first): {candidates}")
 
     headers = {"Content-Type": "application/json"}
     if MEMCLAW_API_KEY:
         headers["X-API-Key"] = MEMCLAW_API_KEY
+
+    memory_id = candidates[0]
+    log(label, f"Polling contradiction detection for memory {memory_id}...")
 
     for _ in range(12):  # up to 60s
         time.sleep(5)
@@ -220,12 +249,23 @@ def wait_for_contradiction_detection(day: int, sourcing_reply: str, dry_run: boo
                 timeout=30,
             )
             if resp.ok and resp.json().get("detection_status") == "completed":
-                log(label, "Contradiction detection completed.")
-                break
-        except Exception:
-            pass
-    else:
-        log(label, "WARNING: Contradiction detection did not confirm completion within 60s. Synthesis may run before the $299 memory is marked outdated.")
+                log(label, f"Contradiction detection completed for memory {memory_id}.")
+                return
+            if resp.status_code == 404:
+                # Extracted token isn't a real memory ID -- fall back to the next candidate
+                remaining = [c for c in candidates if c != memory_id]
+                if remaining:
+                    candidates = remaining
+                    memory_id = candidates[0]
+                    log(label, f"Memory ID not found (404); trying next candidate {memory_id}...")
+                else:
+                    log(label, "WARNING: No extracted ID resolves to a real memory. Skipping poll; Synthesis may run before contradiction detection finishes.")
+                    return
+            elif not resp.ok:
+                log(label, f"Poll returned HTTP {resp.status_code}: {resp.text[:200]}")
+        except Exception as exc:
+            log(label, f"Poll attempt failed: {exc}")
+    log(label, "WARNING: Contradiction detection did not confirm completion within 60s. Synthesis may run before the $299 memory is marked outdated.")
 
 
 def run_day(day: int, dry_run: bool) -> None:
